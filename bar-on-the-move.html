@@ -2958,53 +2958,10 @@ function handleFileDrop(event, inputId, labelId) {
 
 // ── ADMIN: PULL LIVE STATS FROM GHL ──────────────────
 async function loadAdminStats() {
-  try {
-    const r = await fetch(
-      `${GHL.baseUrl}/contacts/?locationId=${GHL.locationId}&limit=100`,
-      { headers: { 'Authorization': `Bearer ${GHL.token}`, 'Version': '2021-07-28' } }
-    );
-    const data = await r.json();
-    const contacts = data.contacts || [];
-    const bookings = contacts.filter(c => c.tags && c.tags.includes('website-booking'));
-    const staff    = contacts.filter(c => c.tags && c.tags.includes('staff-applicant'));
-    const pending  = contacts.filter(c => !c.tags || (!c.tags.includes('staff-applicant') && !c.tags.includes('website-booking')));
-
-    const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
-    set('adminTotalLeads', contacts.length);
-    set('adminConfirmed',  bookings.length);
-    set('adminPending',    pending.length);
-    set('adminStaff',      staff.length);
-
-    if (bookings.length > 0) {
-      const tbody = document.getElementById('adminBookingsTable');
-      if (tbody) tbody.innerHTML = bookings.slice(0,8).map(c => {
-        const cf = c.customField || [];
-        const getField = key => (cf.find(f => f.key===key)||{}).field_value || '—';
-        return `<tr style="border-bottom:1px solid rgba(255,255,255,0.04);">
-          <td style="padding:0.7rem 0.75rem;color:var(--white);">${c.firstName||''} ${c.lastName||''}</td>
-          <td style="padding:0.7rem 0.75rem;color:var(--gray-light);">${getField('event_type')}</td>
-          <td style="padding:0.7rem 0.75rem;color:var(--gold);">${getField('event_date')}</td>
-          <td style="padding:0.7rem 0.75rem;color:var(--gray);">${getField('event_location')}</td>
-          <td style="padding:0.7rem 0.75rem;"><span style="background:rgba(250,204,21,0.1);border:1px solid rgba(250,204,21,0.3);color:#facc15;font-size:0.7rem;padding:0.2rem 0.6rem;border-radius:2px;">New Lead</span></td>
-          <td style="padding:0.7rem 0.75rem;"><span style="color:var(--gold);font-size:0.8rem;">Assign →</span></td>
-        </tr>`;
-      }).join('');
-    }
-
-    if (staff.length > 0) {
-      const roster = document.getElementById('staffRoster');
-      if (roster) roster.innerHTML = staff.slice(0,6).map(c => `
-        <div class="event-row-item">
-          <div><div class="event-row-name">${c.firstName||''} ${c.lastName||''}</div>
-          <div class="event-row-type">${c.email||''} · ${c.city||'Location TBD'}</div></div>
-          <span style="font-size:0.7rem;color:#60a5fa;">Applicant</span>
-        </div>`).join('');
-    }
-
-    showToast('🔄', 'GHL Sync Complete', `${contacts.length} contacts loaded.`);
-  } catch(err) {
-    showToast('⚠️', 'Sync Note', 'Showing demo data. Connect backend for live sync.');
-  }
+  // SECURITY: this used to list up to 100 CRM contacts straight from the browser
+  // with the GHL token, which exposed every lead to any visitor. Disabled until an
+  // authenticated server endpoint exists (TODO: /api/admin-stats behind a login).
+  showToast('🔒', 'Admin stats unavailable', 'Live GHL stats need an authenticated server endpoint.');
 }
 
 function refreshGHLBookings() { loadAdminStats(); }
@@ -3048,10 +3005,11 @@ function showToast(icon, title, msg) {
 }
 
 // ── GHL CONFIG ───────────────────────────────────────
+// SECURITY: no GHL token in the browser. Contact creation goes through the
+// serverless function /api/ghl-contact, which reads GHL_TOKEN from Vercel env.
 const GHL = {
-  token: 'pit-cded5320-4851-4498-b66f-4749b09e4391',
   locationId: 'mmG9y85amdlwRHmSZOMJ',
-  baseUrl: 'https://services.leadconnectorhq.com',
+  proxyUrl: '/api/ghl-contact',
   calendars: {
     bar:   'r3KcX5Oy6zYX9o5DxKjQ',   // Bar & Beverage Service
     full:  'rfNNrRYzBCUXJXMjBCOh',   // Full-Service Catering
@@ -3066,10 +3024,9 @@ const GHL = {
   const badge = document.getElementById('ghlBadge');
   const badgeText = document.getElementById('ghlBadgeText');
   try {
-    const r = await fetch(`${GHL.baseUrl}/locations/${GHL.locationId}`, {
-      headers: { 'Authorization': `Bearer ${GHL.token}`, 'Version': '2021-07-28' }
-    });
-    if (r.ok) {
+    const r = await fetch(GHL.proxyUrl, { method: 'GET' });
+    const status = r.ok ? await r.json().catch(() => ({})) : {};
+    if (r.ok && status.configured) {
       badge.classList.remove('syncing');
       badgeText.textContent = '✓ Connected to GoHighLevel CRM';
     } else {
@@ -3115,16 +3072,15 @@ function switchBookTab(tab) {
 
 // ── GHL API HELPERS ──────────────────────────────────
 async function ghlCreateContact(payload) {
-  const r = await fetch(`${GHL.baseUrl}/contacts/`, {
+  // Server-side proxy: the browser never sees the GHL token.
+  const r = await fetch(GHL.proxyUrl, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${GHL.token}`,
-      'Version': '2021-07-28',
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ locationId: GHL.locationId, ...payload })
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
   });
-  return r.json();
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok || !data.ok) throw new Error(data.error || 'GHL request failed');
+  return { id: data.id, contact: { id: data.id } };
 }
 
 // ── FORM SUBMISSIONS ─────────────────────────────────
@@ -3146,22 +3102,12 @@ async function submitBooking(e) {
   const addons    = document.getElementById('bf-addons').value;
   const notes     = document.getElementById('bf-notes').value;
 
-  const tagSlug = eventType.toLowerCase().replace(/[\s\/]+/g, '-').replace(/[^a-z0-9-]/g,'');
-  const guestTag = guests ? `guests-${guests.replace(/\s+/g,'-').toLowerCase()}` : '';
-
   try {
+    // Source, tags and custom-field mapping are applied server-side (/api/ghl-contact).
     const result = await ghlCreateContact({
+      form: 'booking',
       firstName, lastName, email, phone,
-      source: 'Bar on the Move Website',
-      tags: ['website-booking', tagSlug, guestTag].filter(Boolean),
-      customField: [
-        { key: 'event_type',     field_value: eventType },
-        { key: 'event_date',     field_value: eventDate },
-        { key: 'guest_count',    field_value: guests },
-        { key: 'event_location', field_value: location },
-        { key: 'add_ons',        field_value: addons },
-        { key: 'event_notes',    field_value: notes }
-      ]
+      eventType, eventDate, guests, location, addons, notes
     });
     if (result.contact || result.id) {
       showToast('🥂', 'Booking Request Sent!', 'Contact created in GHL. We\'ll follow up within 24h.');
@@ -3191,11 +3137,7 @@ async function submitApplication(e) {
   const phone     = e.target.querySelector('[name="appPhone"]')?.value || '';
 
   try {
-    await ghlCreateContact({
-      firstName, lastName, email, phone,
-      source: 'Bar on the Move — Staff Application',
-      tags: ['staff-applicant', 'website-application']
-    });
+    await ghlCreateContact({ form: 'staff', firstName, lastName, email, phone });
     showToast('🍸', 'Application Received!', 'Added to GHL as a staff applicant.');
     e.target.reset();
   } catch {
@@ -3216,11 +3158,7 @@ async function submitVendorForm(e) {
   const phone     = e.target.querySelector('[name="vPhone"]')?.value || '';
 
   try {
-    await ghlCreateContact({
-      firstName, lastName, email, phone,
-      source: 'Bar on the Move — Vendor Partner Application',
-      tags: ['vendor-partner', 'license-holder', 'website-application']
-    });
+    await ghlCreateContact({ form: 'vendor', firstName, lastName, email, phone });
     showToast('🤝', 'Vendor Application Sent!', 'Added to GHL. We\'ll review and reach out.');
     e.target.reset();
   } catch {
